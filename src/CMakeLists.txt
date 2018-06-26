@@ -4,7 +4,8 @@ add_library( myslam SHARED
     map.cpp
     camera.cpp
     config.cpp
-    visual_odometry.cpp
+    visual_odometry_PnP.cpp
+    visual_odometry_ICP.cpp
 )
 
 target_link_libraries( myslam
