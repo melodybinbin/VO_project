@@ -20,3 +20,6 @@ bin/
 
 #cmake-build-debug
 cmake-build-debug/
+
+#KDevelop IDE
+VO_project.kdev4
