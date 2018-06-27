@@ -26,6 +26,8 @@
 #include "myslam/config.h"
 #include "myslam/visual_odometry.h"
 
+using namespace cv;//
+
 namespace myslam
 {
 
@@ -70,10 +72,15 @@ bool VisualOdometry::addFrame ( Frame::Ptr frame )
         extractKeyPoints();
         computeDescriptors();
         featureMatching();
-        poseEstimationPnP();
+	setCurr3DPoints();//
+        //poseEstimationPnP();
+	poseEstimationICP();
         if ( checkEstimatedPose() == true ) // a good estimation
         {
-            curr_->T_c_w_ = T_c_r_estimated_ * ref_->T_c_w_;  // T_c_w = T_c_r*T_r_w 
+            cout << "ref_->T_c_w_: " << endl << ref_->T_c_w_ << endl;//
+	    curr_->T_c_w_ = T_c_r_estimated_ * ref_->T_c_w_;  // T_c_w = T_c_r*T_r_w 
+	    cout << "curr_->T_c_w_: " << endl << curr_->T_c_w_ << endl;//
+	    
             ref_ = curr_;
             setRef3DPoints();
             num_lost_ = 0;
@@ -119,7 +126,16 @@ void VisualOdometry::featureMatching()
     vector<cv::DMatch> matches;
     cv::BFMatcher matcher ( cv::NORM_HAMMING );
     matcher.match ( descriptors_ref_, descriptors_curr_, matches );
-    // select the best matches
+    cout << "matches: " << matches.size() << endl;//
+    
+/*    // 可视化：显示匹配的特征
+    cv::Mat imgMatches;
+    cv::drawMatches( ref_->color_, keypoints_ref_, curr_->color_, keypoints_curr_, matches, imgMatches );
+    cv::imshow ( " matches " , imgMatches );
+    cv::imwrite( "./data/matches.png " , imgMatches );
+    cv::waitKey( 0 ); */
+    
+    /*//方法1 select the best matches
     float min_dis = std::min_element (
                         matches.begin(), matches.end(),
                         [] ( const cv::DMatch& m1, const cv::DMatch& m2 )
@@ -134,8 +150,92 @@ void VisualOdometry::featureMatching()
         {
             feature_matches_.push_back(m);
         }
+    }*/
+    
+    //方法2 select the best matches
+    //-- 第四步:匹配点对筛选
+    double min_dist=10000, max_dist=0;
+
+    //找出所有匹配之间的最小距离和最大距离, 即是最相似的和最不相似的两组点之间的距离
+    for ( int i = 0; i < descriptors_ref_.rows; i++ )
+    {
+        double dist = matches[i].distance;
+        if ( dist < min_dist ) min_dist = dist;
+        if ( dist > max_dist ) max_dist = dist;
     }
+
+    //当描述子之间的距离大于两倍的最小距离时,即认为匹配有误.但有时候最小距离会非常小,设置一个经验值30作为下限.
+    feature_matches_.clear();
+    for ( int i = 0; i < descriptors_ref_.rows; i++ )
+    {
+        if ( matches[i].distance <= max ( 2*min_dist, 30.0 ) )
+	//if ( matches[i].distance <= (2*min_dist) )
+        {
+            feature_matches_.push_back ( matches[i] );
+        }
+    }
+    
     cout<<"good matches: "<<feature_matches_.size()<<endl;
+/*    //显示good matches  
+    cv::Mat imgMatches;
+    cv::drawMatches( ref_->color_, keypoints_ref_, curr_->color_, keypoints_curr_, feature_matches_, imgMatches );
+    cv::imshow( " good matches " , imgMatches );
+    cv::imwrite( "./data/good_matches.png " , imgMatches );
+    cv::waitKey( 0 );   */ 
+
+    ransac(feature_matches_, keypoints_ref_,keypoints_curr_);
+}
+
+//RANSAC算法实现 下面成员函数要有命名空间VisualOdometry::！！！
+void VisualOdometry::ransac(vector<DMatch> feature_matches_,vector<KeyPoint> keypoints_ref_,vector<KeyPoint> keypoints_curr_)
+{
+    //定义保存匹配点对坐标  
+    vector<cv::Point2f> srcPoints(feature_matches_.size()),dstPoints(feature_matches_.size());  
+    //保存从关键点中提取到的匹配点对的坐标  
+    for ( int  i=0;i<feature_matches_.size();i++)  
+    {  
+        /*srcPoints[i]=keypoints_ref_[feature_matches_[i].queryIdx].pt;  
+        dstPoints[i]=keypoints_curr_[feature_matches_[i].trainIdx].pt;*/
+	//有的例程是下面的：
+	srcPoints[i]=keypoints_ref_[feature_matches_[i].trainIdx].pt;  
+        dstPoints[i]=keypoints_curr_[feature_matches_[i].queryIdx].pt;
+    }  
+    //保存计算的单应性矩阵  
+    Mat homography;  
+    //保存点对是否保留的标志  
+    vector<unsigned  char > inliersMask(srcPoints.size());   
+    //匹配点对进行RANSAC过滤  
+    //RANSAC algorithm与下一行等价
+    //homography = findHomography(srcPoints,dstPoints,CV_FM_RANSAC, 5.0, inliersMask);
+    homography = findHomography(srcPoints,dstPoints,RANSAC,100,inliersMask); 
+    //cout << "homography:" << endl << homography << endl;
+    //homography = findHomography(srcPoints,dstPoints,LMEDS,5,inliersMask); //least-median algorithm
+    //homography = findHomography(srcPoints,dstPoints,LMEDS,5,inliersMask,2000,0.995);
+    //RANSAC过滤后的点对匹配信息  
+    //vector<DMatch> matches_ransac;//在头文件中有声明，不能再次申明了！！！
+    //手动的保留RANSAC过滤后的匹配点对  
+    matches_ransac.clear();
+    for ( int  i=0;i<inliersMask.size();i++)  
+    {  
+        if (inliersMask[i])  
+        {  
+            matches_ransac.push_back(feature_matches_[i]);  
+            //cout<<"第"<<i<<"对匹配："<<endl;  
+            //cout<<"queryIdx:"<<matches[i].queryIdx<<"\ttrainIdx:"<<matches[i].trainIdx<<endl;  
+            //cout<<"imgIdx:"<<matches[i].imgIdx<<"\tdistance:"<<matches[i].distance<<endl;  
+        }  
+    } 
+
+    //返回RANSAC过滤后的点对匹配信息  
+    //return  matches_ransac;  
+    cout <<"matches_ransac: "<<matches_ransac.size()<<endl;
+    num_inliers_ = matches_ransac.size();//
+    //显示matches_ransac 
+    cv::Mat imgMatches;
+    cv::drawMatches( ref_->color_, keypoints_ref_, curr_->color_, keypoints_curr_,matches_ransac, imgMatches );
+    cv::imshow( " matches_ransac " , imgMatches );
+    cv::imwrite( "./data/matches_ransac.png " , imgMatches );
+    cv::waitKey( 0 );
 }
 
 void VisualOdometry::setRef3DPoints()
@@ -143,9 +243,17 @@ void VisualOdometry::setRef3DPoints()
     // select the features with depth measurements 
     pts_3d_ref_.clear();
     descriptors_ref_ = Mat();
+    keypoints_ref_ = keypoints_curr_;//
     for ( size_t i=0; i<keypoints_curr_.size(); i++ )
     {
-        double d = ref_->findDepth(keypoints_curr_[i]);               
+        //方法１
+        //double d = ref_->findDepth(keypoints_curr_[i]);
+	//方法２
+	double d = ref_->depth_.ptr<unsigned short> ( int ( keypoints_curr_[i].pt.y ) ) [ int ( keypoints_curr_[i].pt.x ) ];
+	d = d/5000;
+	
+	//cout << "d:" << d << " d_:" << d_ << endl;//
+	
         if ( d > 0)
         {
             Vector3d p_cam = ref_->camera_->pixel2camera(
@@ -157,31 +265,117 @@ void VisualOdometry::setRef3DPoints()
     }
 }
 
-void VisualOdometry::poseEstimationPnP()
+void VisualOdometry::setCurr3DPoints()
 {
-    // construct the 3d 2d observations
-    vector<cv::Point3f> pts3d;
-    vector<cv::Point2f> pts2d;
-    
-    for ( cv::DMatch m:feature_matches_ )
+    // select the features with depth measurements 
+    pts_3d_curr_.clear();
+    for ( size_t i=0; i<keypoints_curr_.size(); i++ )
+    {           
+        //方法１
+        //double d_ = curr_->findDepth(keypoints_curr_[i]);
+	//方法２
+	double d = curr_->depth_.ptr<unsigned short> ( int ( keypoints_curr_[i].pt.y ) ) [ int ( keypoints_curr_[i].pt.x ) ];
+	d = d/5000;
+
+        if ( d > 0)
+        {
+            Vector3d p_cam = curr_->camera_->pixel2camera(
+                Vector2d(keypoints_curr_[i].pt.x, keypoints_curr_[i].pt.y), d
+            );
+	    pts_3d_curr_.push_back( cv::Point3f( p_cam(0,0), p_cam(1,0), p_cam(2,0) ));
+        }
+    }
+}
+
+//编写ICP，替换PnP实现vo
+void VisualOdometry::poseEstimationICP()
+{
+    Mat R, t, R_inv, t_inv, rvec; //ziji tianjia
+    vector<cv::Point3f> pts3d1;
+    vector<cv::Point3f> pts3d2;
+    // select the features with depth measurements 
+   
+    for ( DMatch m:matches_ransac ) //使用findhomography再次筛选的结果 使用LMEDS方法，未使用RANSAC algorithm。
+//    for ( DMatch m:feature_matches_ )   //直接使用这个的话，在运行的窗口中根本看不到相机的位姿？？？？？？？？？
     {
-        pts3d.push_back( pts_3d_ref_[m.queryIdx] );
-        pts2d.push_back( keypoints_curr_[m.trainIdx].pt );
+        pts3d1.push_back( pts_3d_ref_[m.queryIdx] );
+        pts3d2.push_back( pts_3d_curr_[m.trainIdx] );
+        
     }
     
-    Mat K = ( cv::Mat_<double>(3,3)<<
-        ref_->camera_->fx_, 0, ref_->camera_->cx_,
-        0, ref_->camera_->fy_, ref_->camera_->cy_,
-        0,0,1
-    );
-    Mat rvec, tvec, inliers;
-    cv::solvePnPRansac( pts3d, pts2d, K, Mat(), rvec, tvec, false, 100, 4.0, 0.99, inliers );
-    num_inliers_ = inliers.rows;
-    cout<<"pnp inliers: "<<num_inliers_<<endl;
+/*    //把第二帧到第一帧的变换转化第一帧到第二帧的变换 法１
+    vector<cv::Point3f> pts3dtemp;
+    pts3dtemp.clear();
+    pts3dtemp = pts3d1;
+    pts3d1.clear();
+    pts3d1 = pts3d2;
+    pts3d2.clear();
+    pts3d2 = pts3dtemp;*/
+    
+    //SVD方法：
+    cv::Point3f p1, p2;     // center of mass
+    int N = pts3d1.size();
+    for ( int i=0; i<N; i++ )
+    {
+        p1 += pts3d1[i];
+        p2 += pts3d2[i];
+    }
+    p1 /=  N;
+    p2 /=  N;
+    vector<cv::Point3f>     q1 ( N ), q2 ( N ); // remove the center
+    for ( int i=0; i<N; i++ )
+    {
+        q1[i] = pts3d1[i] - p1;
+        q2[i] = pts3d2[i] - p2;
+    }
+
+    // compute q1*q2^T
+    Eigen::Matrix3d W = Eigen::Matrix3d::Zero();
+    for ( int i=0; i<N; i++ )
+    {
+        W += Eigen::Vector3d ( q1[i].x, q1[i].y, q1[i].z ) * Eigen::Vector3d ( q2[i].x, q2[i].y, q2[i].z ).transpose();
+    }
+    //cout<<"W="<<W<<endl;
+
+    // SVD on W
+    Eigen::JacobiSVD<Eigen::Matrix3d> svd ( W, Eigen::ComputeFullU|Eigen::ComputeFullV );
+    Eigen::Matrix3d U = svd.matrixU();
+    Eigen::Matrix3d V = svd.matrixV();
+    //cout<<"U="<<U<<endl;
+    //cout<<"V="<<V<<endl;
+
+    Eigen::Matrix3d R_ = U* ( V.transpose() );
+    Eigen::Vector3d t_ = Eigen::Vector3d ( p1.x, p1.y, p1.z ) - R_ * Eigen::Vector3d ( p2.x, p2.y, p2.z );
+
+    // convert to cv::Mat
+    R = ( Mat_<double> ( 3,3 ) <<
+          R_ ( 0,0 ), R_ ( 0,1 ), R_ ( 0,2 ),
+          R_ ( 1,0 ), R_ ( 1,1 ), R_ ( 1,2 ),
+          R_ ( 2,0 ), R_ ( 2,1 ), R_ ( 2,2 )
+        );
+    t = ( Mat_<double> ( 3,1 ) << t_ ( 0,0 ), t_ ( 1,0 ), t_ ( 2,0 ) );
+    
+    //Eigen::Vector3d rvec = R.log();
+    //rvec = rvec.transpose();
+    
+    //把第二帧到第一帧的变换转化第一帧到第二帧的变换 法２
+    R_inv = R.t();//
+    t_inv = -R.t()*t; 
+    
+    //R_inv = R;
+    //t_inv = t; //和上面把第二帧到第一帧的变换转化第一帧到第二帧的变换 法１－配合使用
+    
+    //cout << "R：" << endl << R_inv << endl;
+        
+    cv::Rodrigues(R_inv, rvec);
+    
     T_c_r_estimated_ = SE3(
         SO3(rvec.at<double>(0,0), rvec.at<double>(1,0), rvec.at<double>(2,0)), 
-        Vector3d( tvec.at<double>(0,0), tvec.at<double>(1,0), tvec.at<double>(2,0))
+        Vector3d( t_inv.at<double>(0,0), t_inv.at<double>(1,0), t_inv.at<double>(2,0))
     );
+      
+    cout << "pose-T_c_r_estimated_：" << endl << T_c_r_estimated_ <<endl;
+    //cv::waitKey(0);
 }
 
 bool VisualOdometry::checkEstimatedPose()
@@ -194,6 +388,7 @@ bool VisualOdometry::checkEstimatedPose()
     }
     // if the motion is too large, it is probably wrong
     Sophus::Vector6d d = T_c_r_estimated_.log();
+    cout<<"motion的模: "<<d.norm()<<endl;//
     if ( d.norm() > 5.0 )
     {
         cout<<"reject because motion is too large: "<<d.norm()<<endl;

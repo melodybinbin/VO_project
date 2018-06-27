@@ -44,10 +44,13 @@ public:
     
     cv::Ptr<cv::ORB> orb_;  // orb detector and computer 
     vector<cv::Point3f>     pts_3d_ref_;        // 3d points in reference frame 
+    vector<cv::Point3f>     pts_3d_curr_;       //
+    vector<cv::KeyPoint>    keypoints_ref_;
     vector<cv::KeyPoint>    keypoints_curr_;    // keypoints in current frame
     Mat                     descriptors_curr_;  // descriptor in current frame 
     Mat                     descriptors_ref_;   // descriptor in reference frame 
     vector<cv::DMatch>      feature_matches_;
+    vector<cv::DMatch>      matches_ransac;//
     
     SE3 T_c_r_estimated_;  // the estimated pose of current frame 
     int num_inliers_;        // number of inlier features in icp
@@ -75,8 +78,11 @@ protected:
     void extractKeyPoints();
     void computeDescriptors(); 
     void featureMatching();
-    void poseEstimationPnP(); 
+    void ransac(vector<cv::DMatch>,vector<cv::KeyPoint>,vector<cv::KeyPoint>);//
+    void poseEstimationPnP();
+    void poseEstimationICP();// 
     void setRef3DPoints();
+    void setCurr3DPoints();//
     
     void addKeyFrame();
     bool checkEstimatedPose(); 
