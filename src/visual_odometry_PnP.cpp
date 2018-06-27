@@ -26,6 +26,8 @@
 #include "myslam/config.h"
 #include "myslam/visual_odometry.h"
 
+//using namespace cv;//
+
 namespace myslam
 {
 
@@ -73,7 +75,10 @@ bool VisualOdometry::addFrame ( Frame::Ptr frame )
         poseEstimationPnP();
         if ( checkEstimatedPose() == true ) // a good estimation
         {
-            curr_->T_c_w_ = T_c_r_estimated_ * ref_->T_c_w_;  // T_c_w = T_c_r*T_r_w 
+            cout << "ref_->T_c_w_: " << endl << ref_->T_c_w_ << endl;//
+	    curr_->T_c_w_ = T_c_r_estimated_ * ref_->T_c_w_;  // T_c_w = T_c_r*T_r_w 
+	    cout << "curr_->T_c_w_: " << endl << curr_->T_c_w_ << endl;//
+	    cv::waitKey( 0 );
             ref_ = curr_;
             setRef3DPoints();
             num_lost_ = 0;
@@ -136,6 +141,13 @@ void VisualOdometry::featureMatching()
         }
     }
     cout<<"good matches: "<<feature_matches_.size()<<endl;
+    
+    //显示feature_matches_ 
+    cv::Mat imgMatches;
+    cv::drawMatches( ref_->color_, keypoints_ref_, curr_->color_, keypoints_curr_,feature_matches_, imgMatches );
+    cv::imshow( " feature_matches_ " , imgMatches );
+    //cv::imwrite( "./data/feature_matches_.png " , imgMatches );
+    //cv::waitKey( 0 );
 }
 
 void VisualOdometry::setRef3DPoints()
@@ -143,6 +155,7 @@ void VisualOdometry::setRef3DPoints()
     // select the features with depth measurements 
     pts_3d_ref_.clear();
     descriptors_ref_ = Mat();
+    keypoints_ref_ = keypoints_curr_;//for the cv::drawMatches
     for ( size_t i=0; i<keypoints_curr_.size(); i++ )
     {
         double d = ref_->findDepth(keypoints_curr_[i]);               
@@ -182,6 +195,7 @@ void VisualOdometry::poseEstimationPnP()
         SO3(rvec.at<double>(0,0), rvec.at<double>(1,0), rvec.at<double>(2,0)), 
         Vector3d( tvec.at<double>(0,0), tvec.at<double>(1,0), tvec.at<double>(2,0))
     );
+    cout << "pose-T_c_r_estimated_：" << endl << T_c_r_estimated_ <<endl;
 }
 
 bool VisualOdometry::checkEstimatedPose()
@@ -194,6 +208,7 @@ bool VisualOdometry::checkEstimatedPose()
     }
     // if the motion is too large, it is probably wrong
     Sophus::Vector6d d = T_c_r_estimated_.log();
+    cout<<"motion的模: "<<d.norm()<<endl;//
     if ( d.norm() > 5.0 )
     {
         cout<<"reject because motion is too large: "<<d.norm()<<endl;
