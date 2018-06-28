@@ -26,6 +26,21 @@
 #include "myslam/config.h"
 #include "myslam/visual_odometry.h"
 
+
+// Eigen3矩阵
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+#include <Eigen/SVD>
+
+//非线性优化算法图优化G2O
+#include  <g2o/core/base_vertex.h> //顶点
+#include  <g2o/core/base_unary_edge.h> //边
+#include  <g2o/core/block_solver.h> //矩阵块分解求解器矩阵空间映射分解
+#include  <g2o/core/optimization_algorithm_gauss_newton.h> //高斯牛顿法
+#include  <g2o/solvers/eigen/linear_solver_eigen.h> //矩阵优化
+#include  <g2o/types/sba/types_six_dof_expmap.h> //定义好的顶点类型和误差变量更新算法6维度优化变量例如相机位姿
+#include  <chrono> //算法计时
+
 using namespace cv;//
 
 namespace myslam
@@ -111,6 +126,77 @@ bool VisualOdometry::addFrame ( Frame::Ptr frame )
 
     return true;
 }
+
+//需自定义边类型误差项g2o edge
+//误差模型——曲线模型的边,模板参数：观测值维度(输入的参数维度)，类型，连接顶点类型(优化变量系统定义好的顶点或者自定义的顶点)
+// 3D点—3D点的边
+class  EdgeProjectXYZRGBDPoseOnly : public  g2o ::BaseUnaryEdge< 3 , Eigen::Vector3d, g2o::VertexSE3Expmap> 
+//基础一元边类型
+{
+public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW; //类成员有Eigen变量时需要显示加此句话宏定义
+    EdgeProjectXYZRGBDPoseOnly ( const Eigen::Vector3d& point ) : _point(point) {} //直接赋值观测值3D点
+   //误差计算
+    virtual  void  computeError ()
+    {
+        const g2o::VertexSE3Expmap* pose = static_cast < const g2o::VertexSE3Expmap*> ( _vertices[ 0 ] ); // 0号顶点为位姿类型强转
+        // measurement is p, point is p'
+        _error = _measurement - pose-> estimate (). map ( _point ); //对观测点进行变换后与测量值做差得到误差
+    }
+    
+   // 3d-3d自定义求解器
+    virtual  void  linearizeOplus ()
+    {
+        g2o::VertexSE3Expmap* pose = static_cast <g2o::VertexSE3Expmap *>(_vertices[ 0 ]); // 0号顶点为位姿类型强转
+        g2o::SE3Quat T (pose-> estimate ()); //得到变换矩阵
+        Eigen::Vector3d xyz_trans = T. map (_point); //对点进行变换
+        double x = xyz_trans[ 0 ]; //变换后的xyz
+        double y = xyz_trans[ 1 ];
+        double z = xyz_trans[ 2 ];
+        // 3×6的雅克比矩阵误差对应的导数优化变量更新增量
+	/*
+	* P'对∇f的偏导数= [ I -P'叉乘矩阵] 3*6大小平移在前旋转在后
+	* = [ 1 0 0 0 Z' -Y' 
+	* 0 1 0 -Z' 0 X'
+	* 0 0 1 Y' -X 0]
+	* 旋转在前平移在后
+	* = [ 0 Z' -Y' 1 0 0 
+	* -Z' 0 X' 0 1 0 
+	* Y' -X 0 0 0 1]
+	* 
+	* J = - P'对∇f的偏导数
+	* = [ 0 -Z' Y' -1 0 0 
+	* Z' 0 -X' 0 -1 0 
+	* -Y' X' 0 0 0 -1]
+	*/
+        _jacobianOplusXi ( 0 , 0 ) = 0 ;
+        _jacobianOplusXi ( 0 , 1 ) = -z;
+        _jacobianOplusXi ( 0 , 2 ) = y;
+        _jacobianOplusXi ( 0 , 3 ) = - 1 ;
+        _jacobianOplusXi ( 0 , 4 ) = 0 ;
+        _jacobianOplusXi ( 0 , 5 ) = 0 ;
+        
+        _jacobianOplusXi ( 1 , 0 ) = z;
+        _jacobianOplusXi ( 1 , 1 ) = 0 ;
+        _jacobianOplusXi ( 1 , 2 ) = -x;
+        _jacobianOplusXi ( 1 , 3 ) = 0 ;
+        _jacobianOplusXi ( 1 , 4 ) = - 1 ;
+        _jacobianOplusXi ( 1 , 5 ) = 0 ;
+        
+        _jacobianOplusXi ( 2 , 0 ) = -y;
+        _jacobianOplusXi ( 2 , 1 ) = x;
+        _jacobianOplusXi ( 2 , 2 ) = 0 ;
+        _jacobianOplusXi ( 2 , 3 ) = 0 ;
+        _jacobianOplusXi ( 2 , 4 ) = 0 ;
+        _jacobianOplusXi ( 2 , 5 ) = - 1 ;
+    }
+
+    bool  read ( istream& in ) {}
+    bool  write ( ostream& out ) const {}
+    
+protected:
+    Eigen::Vector3d _point;
+};
 
 void VisualOdometry::extractKeyPoints()
 {
@@ -209,7 +295,7 @@ void VisualOdometry::ransac(vector<DMatch> feature_matches_,vector<KeyPoint> key
     //匹配点对进行RANSAC过滤  
     //RANSAC algorithm与下一行等价
     //homography = findHomography(srcPoints,dstPoints,CV_FM_RANSAC, 5.0, inliersMask);
-    homography = findHomography(srcPoints,dstPoints,RANSAC,50,inliersMask,2000,0.995); 
+    homography = findHomography(srcPoints,dstPoints,RANSAC,100,inliersMask,2000,0.995); 
     //cout << "homography:" << endl << homography << endl;
     //homography = findHomography(srcPoints,dstPoints,LMEDS,5,inliersMask); //least-median algorithm
     //homography = findHomography(srcPoints,dstPoints,LMEDS,5,inliersMask,2000,0.995);
@@ -373,19 +459,16 @@ void VisualOdometry::poseEstimationICP()
           R_ ( 2,0 ), R_ ( 2,1 ), R_ ( 2,2 )
         );
     t = ( Mat_<double> ( 3,1 ) << t_ ( 0,0 ), t_ ( 1,0 ), t_ ( 2,0 ) );
-    
-    //Eigen::Vector3d rvec = R.log();
-    //rvec = rvec.transpose();
-    
-    /*//把第二帧到第一帧的变换转化第一帧到第二帧的变换 法２
-    R_inv = R.t();//
-    t_inv = -R.t()*t; */
+    //cout << "R-before: " << R << endl;
+    //cout << "t-before: " << t << endl;
     
     R_inv = R;
     t_inv = t; //和上面把第二帧到第一帧的变换转化第一帧到第二帧的变换 法１－配合使用
-    
-    //cout << "R：" << endl << R_inv << endl;
         
+    /*//把第二帧到第一帧的变换转化第一帧到第二帧的变换 法２
+    R_inv = R.t();//
+    t_inv = -R.t()*t;*/
+    
     cv::Rodrigues(R_inv, rvec);
     
     T_c_r_estimated_ = SE3(
@@ -393,7 +476,75 @@ void VisualOdometry::poseEstimationICP()
         Vector3d( t_inv.at<double>(0,0), t_inv.at<double>(1,0), t_inv.at<double>(2,0))
     );
       
-    cout << "pose-T_c_r_estimated_：" << endl << T_c_r_estimated_ << endl;
+    cout << "pose-T_c_r_estimated_before：" << endl << T_c_r_estimated_ << endl;
+
+    
+    cout<< "非线性优化方法bundle adjustment求解" <<endl;
+    
+    
+    //初始化g2o
+    g2o::SparseOptimizer optimizer;
+    typedef g2o::BlockSolver< g2o::BlockSolverTraits< 6 , 3 > > Block;   // pose维度为6, landmark维度为3
+    Block::LinearSolverType* linearSolver = new g2o::LinearSolverEigen<Block::PoseMatrixType>(); //线性方程求解器
+    Block* solver_ptr = new Block ( linearSolver ); //矩阵块求解器矩阵分解      
+    g2o::OptimizationAlgorithmGaussNewton* solver = new  g2o::OptimizationAlgorithmGaussNewton ( solver_ptr );
+    //g2o::SparseOptimizer optimizer;//放到了前面
+    optimizer. setAlgorithm ( solver );
+
+    //顶点vertex
+    g2o::VertexSE3Expmap* pose = new  g2o::VertexSE3Expmap (); //位姿camera pose
+    pose-> setId ( 0 );
+    /*pose-> setEstimate ( g2o::SE3Quat (
+        Eigen::Matrix3d::Identity (),
+        Eigen::Vector3d ( 0 , 0 , 0 )
+    ) );*/
+    
+    //修改为前一帧的位姿－重中之重！！！
+    pose->setEstimate ( g2o::SE3Quat (
+        T_c_r_estimated_.rotation_matrix(), 
+        T_c_r_estimated_.translation()
+    ) );
+    optimizer.addVertex ( pose ); //添加顶点
+
+    //边edges
+    int  index = 1 ;
+    vector<EdgeProjectXYZRGBDPoseOnly*> edges; //所有的边
+    for ( size_t i= 0 ; i<pts3d1. size (); i++ )
+    {
+        EdgeProjectXYZRGBDPoseOnly* edge = new  EdgeProjectXYZRGBDPoseOnly (
+            Eigen::Vector3d (pts3d2[i]. x , pts3d2[i]. y , pts3d2[i]. z ) ); //点2
+        edge-> setId ( index );
+        edge-> setVertex ( 0 , dynamic_cast <g2o::VertexSE3Expmap*> (pose) ); //顶点
+        edge-> setMeasurement ( Eigen::Vector3d (
+            pts3d1[i]. x , pts3d1[i]. y , pts3d1[i]. z ) ); 
+	//点1 = T *点2 =点1'
+        edge-> setInformation ( Eigen::Matrix3d::Identity ()* 1e4 ); //误差项系数矩阵信息矩阵
+        optimizer. addEdge (edge); //向图中添加边
+        index ++;
+        edges.push_back (edge); //所有的边
+    }
+
+    chrono::steady_clock::time_point t1 = chrono::steady_clock::now (); //计时开始
+    optimizer.setVerbose ( true );
+    optimizer.initializeOptimization ();
+    optimizer.optimize ( 50 ); 
+    //最大优化次数为10
+    //optimizer.optimize ( 50 ); //
+    
+    T_c_r_estimated_ = SE3 (
+        pose->estimate().rotation(),
+        pose->estimate().translation()
+    );
+    cout << "pose-T_c_r_estimated_after：" << endl << T_c_r_estimated_ << endl;
+    
+    chrono::steady_clock::time_point t2 = chrono::steady_clock::now (); //计时结束
+    chrono::duration< double > time_used = chrono::duration_cast<chrono::duration< double >>(t2-t1);
+    cout<< " optimization costs time: " <<time_used. count ()<< " seconds. " <<endl;
+
+    //cout<<endl<< "优化后的R和t : " <<endl;
+    //cout<< "变换矩阵T = " <<endl<< Eigen::Isometry3d ( pose-> estimate () ). matrix ()<<endl;  
+      
+    
     //cv::waitKey(0);
 }
 

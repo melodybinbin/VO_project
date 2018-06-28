@@ -78,14 +78,17 @@ bool VisualOdometry::addFrame ( Frame::Ptr frame )
             cout << "ref_->T_c_w_: " << endl << ref_->T_c_w_ << endl;//
 	    curr_->T_c_w_ = T_c_r_estimated_ * ref_->T_c_w_;  // T_c_w = T_c_r*T_r_w 
 	    cout << "curr_->T_c_w_: " << endl << curr_->T_c_w_ << endl;//
-	    cv::waitKey( 0 );
+	    
             ref_ = curr_;
             setRef3DPoints();
             num_lost_ = 0;
+	    cv::waitKey(300);
             if ( checkKeyFrame() == true ) // is a key-frame
             {
                 addKeyFrame();
+		//cv::waitKey( 0 );
             }
+            cv::waitKey( 0 );
         }
         else // bad estimation due to various reasons
         {
@@ -222,6 +225,10 @@ bool VisualOdometry::checkKeyFrame()
     Sophus::Vector6d d = T_c_r_estimated_.log();
     Vector3d trans = d.head<3>();
     Vector3d rot = d.tail<3>();
+    
+    cout << "rot.norm(): " << rot.norm() << endl;
+    cout << "trans.norm(): " << trans.norm() << endl;
+    
     if ( rot.norm() >key_frame_min_rot || trans.norm() >key_frame_min_trans )
         return true;
     return false;

@@ -25,6 +25,9 @@
 
 #include <opencv2/features2d/features2d.hpp>
 
+//定义cv::Point3f
+using namespace cv;
+
 namespace myslam 
 {
 class VisualOdometry
@@ -54,6 +57,7 @@ public:
     
     SE3 T_c_r_estimated_;  // the estimated pose of current frame 
     int num_inliers_;        // number of inlier features in icp
+    int num_inliersMask;        // number of inlier features in icp
     int num_lost_;           // number of lost times
     
     // parameters 
@@ -84,6 +88,14 @@ protected:
     void setRef3DPoints();
     void setCurr3DPoints();//
     
+    // g2o_BundleAdjustment优化计算旋转和平移
+    // ICP算法求解3D-3D点对的转换矩阵后使用图优化进行优化
+    void  bundleAdjustment (
+    const vector<Point3f>& pts1, // 3D点
+    const vector<Point3f>& pts2, // 3D点
+    Mat& R, Mat& t //初始RT以及优化更新后的量
+    );
+
     void addKeyFrame();
     bool checkEstimatedPose(); 
     bool checkKeyFrame();
